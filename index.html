@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Elo Ranking Tool - Actors Edition</title>
+    <title>Global Elo Ranking Tool - Actors Edition</title>
     <style>
         :root {
             --bg-color: #f4f4f9;
@@ -36,7 +36,13 @@
 
         h1, h2 { text-align: center; }
 
-        /* Ranking Section */
+        .status-msg {
+            text-align: center;
+            color: #d9534f;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+
         #ranking-section { display: block; }
         
         .matchup-container {
@@ -69,6 +75,12 @@
             background: #eef5ff;
             transform: translateY(-2px);
         }
+        
+        .item-card.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
 
         .controls {
             display: flex;
@@ -90,10 +102,7 @@
 
         .btn-secondary { background-color: #6c757d; }
         .btn-secondary:hover { background-color: #5a6268; }
-        .btn-danger { background-color: #dc3545; }
-        .btn-danger:hover { background-color: #c82333; }
 
-        /* Leaderboard */
         table {
             width: 100%;
             border-collapse: collapse;
@@ -118,22 +127,22 @@
 <body>
 
 <div class="container">
-    <h1>Elo Ranking Tool</h1>
+    <h1>Global Elo Ranking</h1>
+    <div id="status-message" class="status-msg">Connecting to database...</div>
 
     <div id="ranking-section">
         <h2>Who is the better actor?</h2>
         
         <div class="matchup-container">
-            <div id="item1-card" class="item-card" onclick="castVote(0)">Item 1</div>
-            <div id="item2-card" class="item-card" onclick="castVote(1)">Item 2</div>
+            <div id="item1-card" class="item-card disabled">Loading...</div>
+            <div id="item2-card" class="item-card disabled">Loading...</div>
         </div>
 
         <div class="controls">
-            <button class="btn-secondary" onclick="generateMatchup()">Skip Matchup</button>
-            <button class="btn-danger" onclick="resetApp()">Restart Rankings</button>
+            <button class="btn-secondary" id="skip-btn" disabled>Skip Matchup</button>
         </div>
 
-        <h2>Leaderboard</h2>
+        <h2>Live Leaderboard</h2>
         <table id="leaderboard">
             <thead>
                 <tr>
@@ -149,10 +158,38 @@
     </div>
 </div>
 
-<script>
+<script type="module">
+    // Import Firebase tools
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-app.js";
+    import { getFirestore, collection, doc, getDocs, runTransaction, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-firestore.js";
+
     // ==========================================
-    // STATIC LIST OF ACTORS
+    // ⚠️ PASTE YOUR FIREBASE CONFIG HERE ⚠️
     // ==========================================
+   const firebaseConfig = {
+      apiKey: "AIzaSyAzLx-R2iZRh_as8v0SUCjZzbr4kBtUiuM",
+      authDomain: "actor-elo-app.firebaseapp.com",
+      projectId: "actor-elo-app",
+      storageBucket: "actor-elo-app.firebasestorage.app",
+      messagingSenderId: "345287849419",
+      appId: "1:345287849419:web:cfc0d75c3c18c23471324e"
+};
+
+    // Initialize Firebase
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // DOM Elements
+    const item1Card = document.getElementById('item1-card');
+    const item2Card = document.getElementById('item2-card');
+    const leaderboardBody = document.getElementById('leaderboard-body');
+    const statusMsg = document.getElementById('status-message');
+    const skipBtn = document.getElementById('skip-btn');
+
+    let items = [];
+    let currentMatch = [];
+    const K_FACTOR = 32;
+
     const myStaticList = [
         "Leonardo DiCaprio",
         "Adam Driver",
@@ -235,32 +272,57 @@
     ];
     // ==========================================
 
-    let items = [];
-    let currentMatch = [];
-    const K_FACTOR = 32;
+    async function initializeDatabase() {
+        const actorsRef = collection(db, "actors");
+        const snapshot = await getDocs(actorsRef);
 
-    // DOM Elements
-    const item1Card = document.getElementById('item1-card');
-    const item2Card = document.getElementById('item2-card');
-    const leaderboardBody = document.getElementById('leaderboard-body');
+        // If the database is empty, populate it!
+        if (snapshot.empty) {
+            statusMsg.innerText = "Setting up global database for the first time... please wait.";
+            const batch = writeBatch(db);
+            
+            myStaticList.forEach(actor => {
+                // We use the actor's name as the document ID for easy lookup
+                const docRef = doc(db, "actors", actor);
+                batch.set(docRef, {
+                    name: actor,
+                    elo: 1200,
+                    matches: 0
+                });
+            });
 
-    // Initialize the app immediately on load
-    function initApp() {
-        items = myStaticList.map((name, index) => ({
-            id: index,
-            name: name,
-            elo: 1200,
-            matches: 0
-        }));
+            await batch.commit();
+        }
+        
+        statusMsg.innerText = "Connected to live database!";
+        setTimeout(() => { statusMsg.style.display = 'none'; }, 2000);
+        
+        // Start listening to live changes
+        listenToLeaderboard();
+    }
 
-        generateMatchup();
-        updateLeaderboard();
+    function listenToLeaderboard() {
+        const actorsRef = collection(db, "actors");
+        
+        // onSnapshot automatically runs every time ANYONE updates the database
+        onSnapshot(actorsRef, (snapshot) => {
+            items = [];
+            snapshot.forEach((doc) => {
+                items.push({ id: doc.id, ...doc.data() });
+            });
+            
+            updateLeaderboard();
+
+            // If a matchup hasn't been generated yet, do it now
+            if (currentMatch.length === 0) {
+                generateMatchup();
+            }
+        });
     }
 
     function generateMatchup() {
         if (items.length < 2) return;
 
-        // Pick two random distinct items
         let idx1 = Math.floor(Math.random() * items.length);
         let idx2;
         do {
@@ -271,30 +333,77 @@
 
         item1Card.innerText = currentMatch[0].name;
         item2Card.innerText = currentMatch[1].name;
+
+        // Enable buttons
+        item1Card.classList.remove('disabled');
+        item2Card.classList.remove('disabled');
+        skipBtn.disabled = false;
     }
 
-    function castVote(winnerIndex) {
-        const winner = currentMatch[winnerIndex];
-        const loser = currentMatch[winnerIndex === 0 ? 1 : 0];
+    // Attach functions to the window object so HTML buttons can click them
+    window.generateMatchup = generateMatchup;
 
-        // Elo Math
-        const expectedWinner = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
-        const expectedLoser = 1 / (1 + Math.pow(10, (winner.elo - loser.elo) / 400));
+    window.castVote = async function(winnerIndex) {
+        // Disable buttons temporarily to prevent double-clicking
+        item1Card.classList.add('disabled');
+        item2Card.classList.add('disabled');
+        skipBtn.disabled = true;
 
-        winner.elo = winner.elo + K_FACTOR * (1 - expectedWinner);
-        loser.elo = loser.elo + K_FACTOR * (0 - expectedLoser);
+        const winnerName = currentMatch[winnerIndex].name;
+        const loserName = currentMatch[winnerIndex === 0 ? 1 : 0].name;
 
-        winner.matches++;
-        loser.matches++;
+        const winnerRef = doc(db, "actors", winnerName);
+        const loserRef = doc(db, "actors", loserName);
 
-        updateLeaderboard();
-        generateMatchup();
-    }
+        try {
+            // A Transaction ensures we do the math based on the EXACT live score, 
+            // even if someone else voted 1 second ago.
+            await runTransaction(db, async (transaction) => {
+                const winnerDoc = await transaction.get(winnerRef);
+                const loserDoc = await transaction.get(loserRef);
+
+                if (!winnerDoc.exists() || !loserDoc.exists()) {
+                    throw "Actor does not exist!";
+                }
+
+                let winnerElo = winnerDoc.data().elo;
+                let loserElo = loserDoc.data().elo;
+                let winnerMatches = winnerDoc.data().matches;
+                let loserMatches = loserDoc.data().matches;
+
+                // Elo Math
+                const expectedWinner = 1 / (1 + Math.pow(10, (loserElo - winnerElo) / 400));
+                const expectedLoser = 1 / (1 + Math.pow(10, (winnerElo - loserElo) / 400));
+
+                const newWinnerElo = winnerElo + K_FACTOR * (1 - expectedWinner);
+                const newLoserElo = loserElo + K_FACTOR * (0 - expectedLoser);
+
+                transaction.update(winnerRef, { elo: newWinnerElo, matches: winnerMatches + 1 });
+                transaction.update(loserRef, { elo: newLoserElo, matches: loserMatches + 1 });
+            });
+
+            // Generate next matchup
+            generateMatchup();
+
+        } catch (error) {
+            console.error("Transaction failed: ", error);
+            statusMsg.style.display = 'block';
+            statusMsg.innerText = "Error saving vote. Try again.";
+            
+            // Re-enable buttons if failed
+            item1Card.classList.remove('disabled');
+            item2Card.classList.remove('disabled');
+            skipBtn.disabled = false;
+        }
+    };
+
+    // Make Skip button work via Javascript event listener
+    skipBtn.addEventListener('click', generateMatchup);
+    item1Card.addEventListener('click', () => window.castVote(0));
+    item2Card.addEventListener('click', () => window.castVote(1));
 
     function updateLeaderboard() {
-        // Sort by Elo descending
         const sortedItems = [...items].sort((a, b) => b.elo - a.elo);
-        
         leaderboardBody.innerHTML = '';
         
         sortedItems.forEach((item, index) => {
@@ -309,22 +418,9 @@
         });
     }
 
-    function resetApp() {
-        if(confirm("Are you sure? This will reset all scores back to 1200.")) {
-            // Reset scores instead of deleting the list
-            items.forEach(item => {
-                item.elo = 1200;
-                item.matches = 0;
-            });
-            updateLeaderboard();
-            generateMatchup();
-        }
-    }
-
-    // Start everything when the script runs
-    initApp();
+    // Start the whole process
+    initializeDatabase();
 </script>
 
 </body>
 </html>
-```
